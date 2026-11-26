@@ -128,6 +128,8 @@ impl PluginGroup for GamePlugins {
             .add(crate::death::DeathPlugin)
             .add(crate::client_state::ClientStatePlugin { start: self.start })
             .add(crate::glue_session::GlueSessionPlugin)
+            // After the roster exists: a relaunch's resumed character is seeded into it.
+            .add(crate::resume::ResumePlugin)
             .add(SoundPlugin)
             .add(TargetPlugin)
             .add(TransportPlugin)

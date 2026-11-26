@@ -135,6 +135,8 @@ impl CvarCallbacks<'_> {
         if let Some(k) = self.violence.as_mut() {
             crate::creature_anim::blood::on_cvar(ev, k.reborrow(), cvars.locale);
         }
+        // No knob: a process-wide flag, read once the app has exited.
+        crate::video::on_relaunch_cvar(ev, cvars);
     }
 }
 

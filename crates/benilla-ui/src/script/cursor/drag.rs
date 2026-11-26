@@ -118,6 +118,14 @@ pub(crate) fn maybe_start_drag(model: &mut Model, pos: (f32, f32)) -> Option<(u3
             held.map_or_else(|| g.button.clone(), |name| (*name).to_string()),
         )
     };
+    // A DISABLED Button starts no drag: the stock SpellBookFrame disables an empty slot past the
+    // tab's end, whose flat index is the next tab's first spell, and the hover and press slots
+    // already skip a disabled Button (`0x779490`, `0x77922e`). The gesture is dropped, so its
+    // release ends nothing either.
+    if !super::super::button::is_enabled(model, source) {
+        model.drag = None;
+        return None;
+    }
     model.drag.as_mut().expect("checked Some above").started = true;
     // A dragged button un-presses at the threshold, not on leaving its rect: `CSimpleButton`'s
     // `+0x74` override (`0x7793f0`) un-presses (`0x779410`) before firing `OnDragStart`.

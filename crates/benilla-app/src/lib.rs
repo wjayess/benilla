@@ -94,6 +94,7 @@ mod quest_markers;
 mod raid_marks;
 mod ranged_flex;
 mod realmlist;
+mod resume;
 mod run_mode;
 mod screen_fade;
 mod screenshot;
@@ -249,6 +250,9 @@ fn main_apartment() {
 fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     #[cfg(windows)]
     main_apartment();
+    // A relaunch's handed-over session, read before the IO thread exists ([`resume`]); stdin is
+    // read only when the launch carries the resume marker.
+    resume::read_from_parent();
     // `WOW_HOVER_LOG_REPORT=<csv>` and `WOW_CAPTURE=list` print and exit before any setup.
     if let Ok(path) = std::env::var("WOW_HOVER_LOG_REPORT") {
         dev::report_recorded_hover_log(&path);
@@ -360,7 +364,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
     // No `game://` source: the five UI shaders are compiled in by `crate::shaders`
     // (`embedded://benilla_app/shaders/…`), so no build-machine path reaches the binary.
 
-    app.add_plugins(benilla_world::boot::tuned_default_plugins(Window {
+    // The renderer is pinned to `gxBackend` (or `$WGPU_BACKEND`) as it is born
+    // ([`video::with_boot_backends`]): wgpu picks its API once, so a change waits for a launch.
+    app.add_plugins(video::with_boot_backends(benilla_world::boot::tuned_default_plugins(Window {
         title: "benilla".into(),
         // Born in the player's display mode (`gxWindow` read straight off `config.toml`) rather
         // than flipped into it at `Startup`, which would flash on every launch and, under
@@ -427,7 +433,7 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
             bevy::window::WindowLevel::Normal
         },
         ..default()
-    }))
+    })))
     .add_plugins(benilla_world::thread_qos::ThreadQosPlugin)
     // Undoes winit's forced macOS app activation for background runs; the window-side half is the
     // `Window` above.
@@ -490,5 +496,9 @@ fn launch(build: BuildId, extend: Option<Extension<'_>>) -> AppExit {
 
     // Returns the app's exit status: a failed capture sets `AppExit::error()`
     // (`capture::drive_capture`), which must not exit 0 with no PNG on disk.
-    app.run()
+    let exit = app.run();
+    // The Graphics API prompt's "Yes": the config is saved by now, so the new process
+    // boots on the chosen backend.
+    video::relaunch_if_requested();
+    exit
 }

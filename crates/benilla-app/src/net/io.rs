@@ -604,6 +604,72 @@ fn keypad(
     }
 }
 
+/// How a resumed session ended.
+enum Resumed {
+    /// The cycle is over, as [`run`]'s are.
+    Cycle(Cycle),
+    /// A login typed at the character screen supersedes it.
+    Login(LoginRequest),
+}
+
+/// benilla's own ([`crate::resume`]): a relaunched client's world session from a handed-over
+/// ticket, with no logon. The screens are told a logon began; the world dial's first stage ends
+/// it, as it ends a logon with no realm list to publish, so they go through the world connect and
+/// the character screen as after any login, and the seeded pick enters the world. A refused key
+/// is reported as a failed world connect, and the thread parks for credentials. No realm list is
+/// ever asked of realmd here: there is no password to dial it with ([`benilla_protocol::Logon::can_redial`]).
+#[allow(clippy::too_many_arguments)]
+fn resume(
+    ticket: crate::resume::ResumeTicket,
+    events_tx: &Sender<SessionEvent>,
+    writer_tx: &Sender<WriterSwap>,
+    parks: &Parks,
+    abandon: &AtomicU64,
+    ping_clock: &Mutex<PingClock>,
+    tails_announced: &mut std::collections::HashSet<u16>,
+) -> Result<Resumed> {
+    let Ok(session_key) = ticket.session_key.as_slice().try_into() else {
+        bevy::log::warn!("resume: the ticket's session key is the wrong length — not resuming");
+        return Ok(Resumed::Cycle(Cycle::Repark));
+    };
+    let generation = abandon.load(Ordering::SeqCst);
+    let req = LoginRequest {
+        user: ticket.user.clone(),
+        // No password crosses the handover; nothing here dials realmd.
+        pass: String::new(),
+        host: ticket.host.clone(),
+        locale: ticket.locale,
+        generation,
+    };
+    let mut logon = benilla_protocol::Logon::resumed(session_key, ticket.realm.clone());
+    bevy::log::info!(
+        "resume: rejoining {} on {} without a logon",
+        ticket.user,
+        ticket.realm.name
+    );
+    let _ = events_tx.send(SessionEvent::LoginStage {
+        stage: LoginStage::Connecting,
+    });
+    let ended = world(
+        &req,
+        &mut logon,
+        (ticket.realm.clone(), generation),
+        events_tx,
+        writer_tx,
+        parks,
+        abandon,
+        ping_clock,
+        tails_announced,
+    )?;
+    Ok(match ended {
+        WorldEnd::Cycle(cycle) => Resumed::Cycle(cycle),
+        WorldEnd::Login(next) => Resumed::Login(next),
+        // A refusal (already reported), a cancel, or Change Realm: the realm list needs realmd,
+        // so the login screen it is.
+        WorldEnd::Failed => Resumed::Cycle(Cycle::Repark),
+    })
+}
+
 /// One connection cycle: park for credentials, logon, the logon park over the realm list, world
 /// handshake, roster, park at character select, enter the world and stream [`SessionEvent`]s
 /// until the socket dies, the character logs out or the app exits. A logon failure emits
@@ -617,7 +683,24 @@ fn run(
     ping_clock: &Mutex<PingClock>,
     tails_announced: &mut std::collections::HashSet<u16>,
 ) -> Result<Cycle> {
-    let Some(mut req) = login_park(parks, events_tx) else {
+    // A relaunched client rejoins the world on the session it was handed, once
+    // ([`crate::resume`]); a login typed at its character screen goes on as any login does.
+    let resumed = match crate::resume::take_incoming() {
+        Some(ticket) => match resume(
+            ticket,
+            events_tx,
+            writer_tx,
+            parks,
+            abandon,
+            ping_clock,
+            tails_announced,
+        )? {
+            Resumed::Cycle(cycle) => return Ok(cycle),
+            Resumed::Login(next) => Some(next),
+        },
+        None => None,
+    };
+    let Some(mut req) = resumed.or_else(|| login_park(parks, events_tx)) else {
         return Ok(Cycle::Exit);
     };
     'logon: loop {
@@ -1090,9 +1173,20 @@ fn world(
                 return Ok(WorldEnd::Cycle(Cycle::Exit));
             }
             bevy::log::info!("net: connected to {world_addr}");
+            // What a relaunch would hand over while this session stands ([`crate::resume`]).
+            crate::resume::post(crate::resume::ResumeTicket {
+                user: req.user.clone(),
+                host: req.host.clone(),
+                locale: req.locale,
+                session_key: logon.session_key.to_vec(),
+                realm: realm.clone(),
+                guid,
+            });
 
-            let reason = match stream(&mut reader, park_rx, events_tx, ping_clock, tails_announced)?
-            {
+            let streamed = stream(&mut reader, park_rx, events_tx, ping_clock, tails_announced);
+            // However the world session ended, there is nothing left to resume.
+            crate::resume::clear();
+            let reason = match streamed? {
                 StreamEnd::Exit => return Ok(WorldEnd::Cycle(Cycle::Exit)),
                 StreamEnd::Back(reason) => reason,
             };

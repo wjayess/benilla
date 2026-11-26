@@ -260,9 +260,29 @@ pub struct Logon {
     pin: Option<Vec<u8>>,
     /// The challenge asked for a PIN.
     pin_asked: bool,
+    /// Built from a handed-over session key ([`Self::resumed`]), with no password behind it: a
+    /// later logon of its own would prove a wrong password, which realmd counts against the
+    /// account, so it never re-dials ([`Self::can_redial`]).
+    resumed: bool,
 }
 
 impl Logon {
+    /// A logon carried over from an earlier process of this client: the session key that process
+    /// proved and the realm its world session was on, with no realmd link. The world server takes
+    /// the key as the logon's own (`CMSG_AUTH_SESSION`); the realm list is that one realm and is
+    /// never refreshed, as there is no password to dial realmd again with.
+    pub fn resumed(session_key: [u8; SESSION_KEY_LENGTH], realm: RealmInfo) -> Self {
+        Self {
+            session_key,
+            realms: vec![realm],
+            realms_refused: false,
+            stream: None,
+            pin: None,
+            pin_asked: false,
+            resumed: true,
+        }
+    }
+
     /// The reference's `RequestRealmList`: re-reads the list, keeping the old one and dropping
     /// the socket on a failure of the link (realmd closes idle sockets), or emptying it with the
     /// socket up on a reply the record fill refused; `timeout` bounds a silent server.
@@ -316,9 +336,10 @@ impl Logon {
     }
 
     /// Whether a later logon of this account can go on its own: not once a PIN it asked for is
-    /// forgotten ([`Self::forget_pin`]), as only the player can enter one.
+    /// forgotten ([`Self::forget_pin`]), as only the player can enter one, and never for a
+    /// [`Self::resumed`] logon, which holds no password.
     pub fn can_redial(&self) -> bool {
-        !self.pin_asked || self.pin.is_some()
+        !self.resumed && (!self.pin_asked || self.pin.is_some())
     }
 }
 
@@ -472,6 +493,7 @@ fn finish_logon(
         stream: Some(stream),
         pin,
         pin_asked,
+        resumed: false,
     })
 }
 

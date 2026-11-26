@@ -36,6 +36,151 @@ pub(crate) fn novsync_env() -> bool {
     std::env::var("WOW_NOVSYNC").as_deref() == Ok("1")
 }
 
+/// `$WGPU_BACKEND`, wgpu's own session override of the graphics API.
+const BACKEND_ENV: &str = "WGPU_BACKEND";
+
+/// The DirectX Shader Compiler's two libraries, which DX12 needs here: without `dxcompiler.dll`
+/// Bevy compiles shaders with the old FXC (`bevy_render::settings::WgpuSettings::default`), which
+/// fails on benilla's ("Shader translation error ... 0x80004005") and ends the client at the first
+/// world load. Looked up where Bevy looks: the working folder, a bare relative path.
+const DXC_FILES: [&str; 2] = ["dxcompiler.dll", "dxil.dll"];
+
+/// Why this launch fell back from DX12 to Vulkan, kept for the log ([`report_backend_fallback`]),
+/// which is not up yet when the backend is chosen.
+static BACKEND_FALLBACK: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// The backends the renderer may use, decided before it exists: `$WGPU_BACKEND` for a session,
+/// taken as given; else `gxBackend` off `config.toml`, "dx12" (the default) or "vulkan". DX12
+/// runs only with the shader compiler's libraries in the working folder ([`DXC_FILES`]); without
+/// them this launch runs on Vulkan and says so loudly ([`warn_backend_fallback`]). The setting is
+/// left as chosen, so DX12 is back as soon as the files are. Windows only; elsewhere wgpu's own
+/// default stands.
+pub(crate) fn boot_backends() -> Option<wgpu::Backends> {
+    if let Some(env) = wgpu::Backends::from_env() {
+        return Some(env);
+    }
+    if !cfg!(windows) {
+        return None;
+    }
+    let chosen = crate::cvars::boot_cvar("gxBackend").unwrap_or_else(|| "dx12".into());
+    Some(match chosen.trim().to_ascii_lowercase().as_str() {
+        "vulkan" => wgpu::Backends::VULKAN,
+        _ => {
+            let missing: Vec<&str> = DXC_FILES
+                .into_iter()
+                .filter(|file| std::fs::metadata(file).is_err())
+                .collect();
+            if missing.is_empty() {
+                wgpu::Backends::DX12
+            } else {
+                warn_backend_fallback(&missing);
+                wgpu::Backends::VULKAN
+            }
+        }
+    })
+}
+
+/// DX12 was chosen and the shader compiler is missing: a banner on stderr now, the same words in
+/// the log once it is up.
+fn warn_backend_fallback(missing: &[&str]) {
+    let folder = std::env::current_dir()
+        .map(|d| d.display().to_string())
+        .unwrap_or_else(|_| "the folder the game was started from".into());
+    let rule = "=".repeat(78);
+    let message = format!(
+        "{rule}\n\
+         GRAPHICS API: DirectX 12 is selected, but the DirectX Shader Compiler is missing.\n\
+         Missing: {missing}\n\
+         Looked in: {folder}\n\
+         >>> THIS LAUNCH IS RUNNING ON VULKAN INSTEAD. <<<\n\
+         To use DirectX 12: download the latest release of\n\
+         https://github.com/microsoft/DirectXShaderCompiler/releases, copy dxcompiler.dll and\n\
+         dxil.dll from its bin\\x64 folder next to benilla.exe, and start the game from that\n\
+         folder (a shortcut's \"Start in\" must be that folder). Your Graphics API setting is\n\
+         kept, so DirectX 12 is used again as soon as both files are there.\n\
+         {rule}",
+        missing = missing.join(", "),
+    );
+    eprintln!("\n{message}\n");
+    *BACKEND_FALLBACK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(message);
+}
+
+/// Startup: the fallback's words in the log, line by line so each carries the log's prefix.
+fn report_backend_fallback() {
+    let message = BACKEND_FALLBACK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .take();
+    if let Some(message) = message {
+        for line in message.lines() {
+            warn!("{line}");
+        }
+    }
+}
+
+/// The engine's plugins with the renderer pinned to [`boot_backends`]; untouched where it
+/// answers `None`.
+pub(crate) fn with_boot_backends(
+    plugins: bevy::app::PluginGroupBuilder,
+) -> bevy::app::PluginGroupBuilder {
+    match boot_backends() {
+        Some(backends) => plugins.set(bevy::render::RenderPlugin {
+            render_creation: bevy::render::settings::WgpuSettings {
+                backends: Some(backends),
+                ..default()
+            }
+            .into(),
+            ..default()
+        }),
+        None => plugins,
+    }
+}
+
+/// Set by a `gxRelaunch` write of "1": start a fresh client once this one has exited.
+static RELAUNCH: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `gxRelaunch`'s callback, the Graphics API prompt's "Yes" (`SetCVar("gxRelaunch", "1")`
+/// before `ForceQuit()`): arm the relaunch and put the row straight back to "0", so the request
+/// is never saved into `config.toml` and the next client does not relaunch on its own exit.
+pub(crate) fn on_relaunch_cvar(ev: &crate::cvars::CvarChanged, cvars: &mut crate::cvars::Cvars) {
+    if ev.is("gxRelaunch") && ev.flag() {
+        RELAUNCH.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Now, while the world session stands: the exit about to follow ends it.
+        crate::resume::arm();
+        let _ = cvars.set("gxRelaunch", "0");
+    }
+}
+
+/// After the app has exited and saved: start this executable again with the same arguments and
+/// working folder when [`on_relaunch_cvar`] armed it. `$WGPU_BACKEND` is dropped from the new
+/// process's environment, so the `gxBackend` just chosen is the one it boots on. With a character
+/// in the world, the new process rejoins it ([`crate::resume::spawn`]).
+pub(crate) fn relaunch_if_requested() {
+    if !RELAUNCH.load(std::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let exe = match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => {
+            eprintln!("relaunch: cannot find this executable ({e}); start the game again by hand");
+            return;
+        }
+    };
+    // This process's own resume marker, if it was a resumed one, is not passed on: the new one
+    // gets a marker only with a ticket behind it.
+    let args: Vec<std::ffi::OsString> = std::env::args_os()
+        .skip(1)
+        .filter(|a| a != crate::resume::RESUME_ARG)
+        .collect();
+    let mut command = std::process::Command::new(&exe);
+    command.args(args).env_remove(BACKEND_ENV);
+    if let Err(e) = crate::resume::spawn(command) {
+        eprintln!("relaunch: starting {} failed ({e})", exe.display());
+    }
+}
+
 /// Whether this run sizes its own window (a capture, a background run) and so stays windowed.
 /// Session-only: `gxWindow`/`gxResolution` are env-overridden while it holds, never saved over.
 pub(crate) fn windowed_env() -> bool {
@@ -484,6 +629,8 @@ impl Plugin for VideoPlugin {
             // every `GetCVar`, so both read the screen the window has this frame.
             .add_systems(PreUpdate, show_screen_size)
             .add_systems(Startup, (log_display_session, check_window_pinned).chain())
+            // The DX12 → Vulkan fallback ([`boot_backends`]), once the log is up.
+            .add_systems(Startup, report_backend_fallback)
             .add_systems(
                 Update,
                 (

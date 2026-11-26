@@ -434,6 +434,48 @@
             .. "Below 100% trades sharpness for frame rate; above 100% is supersampling, which "
             .. "smooths edges at the cost of frame rate. Applies when you click Apply."
 
+        -- benilla's own: the Graphics API dropdown (`gxBackend`). The pick is saved at once; the
+        -- renderer takes it on the next launch, which the prompt offers to do now.
+        BENILLA_TOOLTIP_GRAPHICS_API =
+            "Chooses the graphics API the game draws with: DirectX 12 or Vulkan.\n\n"
+            .. "Your choice is saved right away and takes effect the next time the game starts."
+
+        BENILLA_GRAPHICS_API_NAMES = { dx12 = "DirectX 12", vulkan = "Vulkan" }
+
+        function BenillaGraphicsApi_Name(value)
+            return BENILLA_GRAPHICS_API_NAMES[string.lower(value or "")] or value
+        end
+
+        -- The row's setFunc: save, then offer the restart when the pick really changed.
+        function BenillaGraphicsApi_Set(value)
+            local old = string.lower(GetCVar("gxBackend") or "")
+            SetCVar("gxBackend", value)
+            if ( string.lower(value) ~= old ) then
+                StaticPopup_Show("BENILLA_GRAPHICS_API_RESTART", BenillaGraphicsApi_Name(value))
+            end
+        end
+
+        -- Yes: arm the relaunch (`gxRelaunch`, never saved) and close at once, as Alt+F4 does.
+        -- No: the setting stays saved, and chat says when it applies.
+        StaticPopupDialogs["BENILLA_GRAPHICS_API_RESTART"] = {
+            text = "Graphics API set to %s.\n\nRestart the game now to switch? If you choose No, "
+                .. "the setting is still saved and takes effect the next time you start the game.",
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function()
+                SetCVar("gxRelaunch", "1")
+                ForceQuit()
+            end,
+            OnCancel = function()
+                DEFAULT_CHAT_FRAME:AddMessage("Graphics API saved as "
+                    .. BenillaGraphicsApi_Name(GetCVar("gxBackend"))
+                    .. ". It will take effect the next time you start the game.", 1.0, 0.82, 0.0)
+            end,
+            timeout = 0,
+            whileDead = 1,
+            exclusive = 1,
+        }
+
         -- 1.12 has no such checkbox.
         BENILLA_TOOLTIP_BACKGROUND_SOUND =
             "Keeps the game's sound playing while you are working in another window.\n\n"
@@ -474,7 +516,7 @@
             Graphics = {
                 "RowUiScale", "RowFarclip", "RowWorldDetail", "RowSpellDetail", "RowBrightness",
                 "RowWeatherDensity",
-                "RowDisplayMode", "RowVerticalSync", "RowRenderScale",
+                "RowDisplayMode", "RowVerticalSync", "RowRenderScale", "RowGraphicsApi",
             },
             -- Guild Names and Player Titles are children of Player Names
             -- (UIOptionsFrame.lua:703-709).
@@ -2018,6 +2060,24 @@
                                                     "BENILLA_TOOLTIP_RENDER_SCALE")
                                                 BenillaOptionsSliderRow_Setup(this, 0.5, 2.0, 0.05)
                                                 this.deferred = 1
+                                            </OnLoad></Scripts>
+                                        </Frame>
+                                        <Frame name="$parentRowGraphicsApi" inherits="BenillaOptionsDropdownRowTemplate">
+                                            <Anchors>
+                                                <Anchor point="TOPLEFT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMLEFT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                                <Anchor point="TOPRIGHT" relativeTo="$parentRowRenderScale" relativePoint="BOTTOMRIGHT"><Offset><AbsDimension x="0" y="-9"/></Offset></Anchor>
+                                            </Anchors>
+                                            <Scripts><OnLoad>
+                                                -- benilla's own: wgpu picks its API at launch, so
+                                                -- the pick saves now and applies on a restart
+                                                -- (BenillaGraphicsApi_Set offers one).
+                                                BenillaOptionsRow_OnLoad(this, "gxBackend", "Graphics API",
+                                                    "BENILLA_TOOLTIP_GRAPHICS_API")
+                                                BenillaOptionsDropdownRow_Setup(this, {
+                                                    { text = "DirectX 12", value = "dx12" },
+                                                    { text = "Vulkan", value = "vulkan" },
+                                                })
+                                                this.setFunc = BenillaGraphicsApi_Set
                                             </OnLoad></Scripts>
                                         </Frame>
                                     </Frames>

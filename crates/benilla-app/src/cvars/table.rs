@@ -869,6 +869,23 @@ pub(crate) const REGISTERED: &[Registered] = &[
         "benilla's own — the reference has no off-screen buffer to hang a resolution dial \
          on; its nearest equivalent, `gxResolution`, drops the interface with the world",
     ),
+    // benilla's own: the graphics API the next launch asks wgpu for, read off `config.toml` before
+    // the renderer exists ([`crate::video::boot_backends`]); Windows only. `gxApi` still reports
+    // the live one. `$WGPU_BACKEND` overrides it for a session.
+    ours(
+        "gxBackend",
+        "dx12",
+        "benilla's own — the reference's `gxApi` chose D3D9 or OpenGL; wgpu's choices are \
+         DirectX 12 and Vulkan, and `gxApi` here only reports the live backend",
+    ),
+    // benilla's own: the Graphics API prompt's "Yes" writes "1" before `ForceQuit()`;
+    // the callback ([`crate::video::on_relaunch_cvar`]) arms a relaunch and writes "0" back, so
+    // it is never saved.
+    ours(
+        "gxRelaunch",
+        "0",
+        "benilla's own — the reference has no self-relaunch; a backend change needs a new process",
+    ),
     // benilla's own: `/console fpsJournal 1` appends a per-second row of position, frame cost and
     // per-pass GPU time to `benilla-config/Diagnostics/fps-journal.csv`. The knob is
     // [`crate::perf::FpsJournalSetting`].
